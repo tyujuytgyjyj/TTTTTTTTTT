@@ -1288,11 +1288,16 @@ fn game_frame(res: &Res, g: &mut Game, settings: &mut servers::Settings, t: f32,
 
     // Adaptive fixed physics timestep based on Graphics/Performance Preset (`Task 1.2 & Task 6.6`)
     // Rock-solid 2400 Hz physics integration rate across all quality presets (prevents any CFL instability or black screen)
-    let (h, max_substeps): (f32, usize) = match settings.gfx_preset {
+    let (h, quality_substeps): (f32, usize) = match settings.gfx_preset {
         0 => (1.0 / 2400.0, g.cars[0].pcfg.substeps_low as usize),
         1 => (1.0 / 2400.0, g.cars[0].pcfg.substeps_med as usize),
         _ => (1.0 / 2400.0, g.cars[0].pcfg.substeps_high as usize),
     };
+    // Keep the fixed 2400 Hz solver synchronized with real elapsed frame time.
+    const MAX_CATCHUP_SUBSTEPS: usize = 240;
+    let required_substeps = (((dt_real * g.time_scale + g.acc).max(0.0) / h).ceil() as usize)
+        .clamp(1, MAX_CATCHUP_SUBSTEPS);
+    let max_substeps = quality_substeps.max(required_substeps);
 
     let mut keys = Input::default();
     let mut back = false;

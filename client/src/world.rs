@@ -53,6 +53,64 @@ impl HeightField {
     pub fn half_extent(&self) -> f32 { (self.n - 1) as f32 * self.cell * 0.5 }
 }
 
+pub struct WaterRegion {
+    heightfield: Arc<HeightField>,
+    step: usize,
+    cells_x: usize,
+    cells_y: usize,
+    connected: Vec<bool>,
+    level: f32,
+}
+
+impl WaterRegion {
+    pub fn depth_at(&self, x: f32, z: f32, y: f32) -> f32 {
+        if self.cells_x == 0 || self.cells_y == 0 || self.step == 0 || self.level <= -1.0e8 {
+            return 0.0;
+        }
+        let fx = (x - self.heightfield.ox) / self.heightfield.cell;
+        let fy = (-z - self.heightfield.oy) / self.heightfield.cell;
+        if fx < 0.0 || fy < 0.0 ||
+           fx > (self.cells_x * self.step) as f32 ||
+           fy > (self.cells_y * self.step) as f32 {
+            return 0.0;
+        }
+        let cx = ((fx / self.step as f32).floor() as usize).min(self.cells_x - 1);
+        let cy = ((fy / self.step as f32).floor() as usize).min(self.cells_y - 1);
+        let index = cy * self.cells_x + cx;
+        if !self.connected.get(index).copied().unwrap_or(false) {
+            return 0.0;
+        }
+        if self.heightfield.height(x, z) >= self.level {
+            return 0.0;
+        }
+        (self.level - y).max(0.0)
+    }
+}
+
+static WATER_REGION: RwLock<Option<Arc<WaterRegion>>> = RwLock::new(None);
+
+pub fn set_water_region(
+    heightfield: Arc<HeightField>,
+    step: usize,
+    level: f32,
+    connected: Vec<bool>,
+) {
+    if step == 0 { return; }
+    let cells_x = (heightfield.n.saturating_sub(1)) / step;
+    let cells_y = cells_x;
+    if cells_x == 0 || cells_y == 0 || connected.len() != cells_x * cells_y {
+        return;
+    }
+    let region = WaterRegion { heightfield, step, cells_x, cells_y, connected, level };
+    if let Ok(mut g) = WATER_REGION.write() {
+        *g = Some(Arc::new(region));
+    }
+}
+
+pub fn water_region() -> Option<Arc<WaterRegion>> {
+    WATER_REGION.read().ok().and_then(|g| g.clone())
+}
+
 static TERRAIN: RwLock<Option<Arc<HeightField>>> = RwLock::new(None);
 
 static ENV: RwLock<[f32; 8]> = RwLock::new([0.0; 8]);
@@ -63,7 +121,12 @@ pub fn set_env(sun: Vec3, fog: Vec3, t: f32, sy: f32) {
 pub fn get_env() -> [f32; 8] { ENV.read().map(|g| *g).unwrap_or([0.0; 8]) }
 
 static WATER_LEVEL: RwLock<f32> = RwLock::new(-1.0e9);
-pub fn set_water_level(v: f32) { if let Ok(mut g) = WATER_LEVEL.write() { *g = v; } }
+pub fn set_water_level(v: f32) {
+    if let Ok(mut g) = WATER_LEVEL.write() { *g = v; }
+    if v < -1.0e8 {
+        if let Ok(mut g) = WATER_REGION.write() { *g = None; }
+    }
+}
 /// مستوى سطح الماء (المحيط) أو -1e9 إن لم يوجد.
 pub fn water_level() -> f32 { WATER_LEVEL.read().map(|g| *g).unwrap_or(-1.0e9) }
 

@@ -723,6 +723,8 @@ impl Car {
         let pcfg = self.pcfg;
         let grav = pcfg.gravity;
         let f = self.frame;
+        let water_region = crate::world::water_region();
+        let water_level = crate::world::water_level();
         self.body.clear_forces(grav);
 
         // ---- Aerodynamics (Drag, Speed-Squared Downforce, and Center of Pressure Balance)
@@ -900,7 +902,12 @@ impl Car {
                 };
                 w.surface_id = surf_id;
                 // الماء: يقل التماسك (hydroplaning) وتزداد مقاومة الدحرجة عند غمر العجلة
-                let wet_d = ((crate::world::water_level() - m.y).max(0.0) / 0.25).min(1.0);
+                let water_depth = if let Some(region) = water_region.as_ref() {
+                    region.depth_at(m.x, m.z, m.y)
+                } else {
+                    (water_level - m.y).max(0.0)
+                };
+                let wet_d = (water_depth / 0.25).clamp(0.0, 1.0);
                 let surf_mu = surf_mu * (1.0 - 0.8 * wet_d);
                 let roll_res = roll_res + 0.35 * wet_d;
 
@@ -1011,24 +1018,32 @@ impl Car {
         }
 
         self.collide_world(h, world);
-        self.apply_water(h);
+        self.apply_water(h, water_region.as_deref(), water_level);
         self.body.beam_forces();
     }
 
     /// فيزياء الماء: طفو + مقاومة لزجة/تربيعية على العقد المغمورة، وانقطاع الدخان عند غمر المحرك.
-    fn apply_water(&mut self, h: f32) {
-        let wl = crate::world::water_level();
-        if wl < -1.0e8 { return; }
+    fn apply_water(
+        &mut self,
+        h: f32,
+        water_region: Option<&crate::world::WaterRegion>,
+        water_level: f32,
+    ) {
+        if water_region.is_none() && water_level < -1.0e8 { return; }
         let n = self.body.pos.len();
         if n == 0 { return; }
-        let mut sum_y = 0.0f32;
+        let mut sum_depth = 0.0f32;
         for i in 0..n {
-            sum_y += self.body.pos[i].y;
-            let y = self.body.pos[i].y;
-            if y < wl {
-                let d = ((wl - y) / 0.4).min(1.0);
+            let p = self.body.pos[i];
+            let depth = if let Some(region) = water_region {
+                region.depth_at(p.x, p.z, p.y)
+            } else {
+                (water_level - p.y).max(0.0)
+            };
+            sum_depth += depth;
+            if depth > 0.0 {
+                let d = (depth / 0.4).min(1.0);
                 let m = self.body.mass[i];
-                // الكثافة الفعالة للسيارة أعلى بقليل من الماء بعد امتلاء الهيكل، فتطفو لحظات ثم تغرق ببطء
                 self.body.frc[i].y += m * 9.81 * 0.92 * d;
                 let v = self.body.vel[i];
                 let drag = m * (5.0 + 2.2 * v.length()) * d;
@@ -1036,8 +1051,7 @@ impl Car {
             }
         }
         let _ = h;
-        // المحرك يتوقف إذا غمر الماء منتصف الهيكل
-        if sum_y / (n as f32) < wl - 0.25 {
+        if sum_depth / (n as f32) > 0.25 {
             self.input.throttle = 0.0;
         }
     }

@@ -84,7 +84,7 @@ fn emit_water_polygon(
     }
 }
 
-fn plane_cells(hf: &crate::world::HeightField, lvl: f32, col: [u8; 4]) -> Vec<Mesh> {
+fn plane_cells(hf: &std::sync::Arc<crate::world::HeightField>, lvl: f32, col: [u8; 4]) -> Vec<Mesh> {
     const STEP: usize = 2;
     let n = hf.n;
     if n <= STEP { return Vec::new(); }
@@ -128,6 +128,9 @@ fn plane_cells(hf: &crate::world::HeightField, lvl: f32, col: [u8; 4]) -> Vec<Me
         if y > 0 { enqueue_water_cell(x, y - 1, cells_x, cells_y, &submerged, &mut connected, &mut queue); }
         if y + 1 < cells_y { enqueue_water_cell(x, y + 1, cells_x, cells_y, &submerged, &mut connected, &mut queue); }
     }
+
+    // Share the visible ocean mask with tire and chassis physics.
+    crate::world::set_water_region(hf.clone(), STEP, surface_level, connected.clone());
 
     let mut out = Vec::new();
     let mut verts = Vec::new();
@@ -177,6 +180,8 @@ impl Water {
         let mut p = 8usize;
         let mut meshes = Vec::new();
         let mut level = -1.0e9f32;
+        let mut physics_level = -1.0e9f32;
+        let mut has_terrain_ocean = false;
         for _ in 0..n {
             if p + 12 > b.len() { break; }
             let (nv, ni, lvl) = (rd(p) as usize, rd(p + 4) as usize, rf(p + 8));
@@ -202,14 +207,18 @@ impl Water {
                 // المحيط: نبني سطح الماء فقط فوق خلايا التضاريس التي تقع تحت مستواه (لا مستوى لانهائي)
                 let col = [verts[0].color[0], verts[0].color[1], verts[0].color[2], 255];
                 if let Some(hf) = crate::world::terrain_hf() {
+                    let effective_level = lvl - 0.30;
                     meshes.extend(plane_cells(&hf, lvl, col));
+                    physics_level = physics_level.max(effective_level);
+                    has_terrain_ocean = true;
                     continue;
                 }
             }
             meshes.push(Mesh { vertices: verts, indices: idx, texture: None });
         }
         if meshes.is_empty() { return None; }
-        crate::world::set_water_level(level);
+        let active_level = if has_terrain_ocean { physics_level } else { level };
+        crate::world::set_water_level(active_level);
         let fs = format!(
             "#version 100\nprecision highp float;\n{}\n{}",
             include_str!("../assets/shaders/common.glsl"),
@@ -239,7 +248,7 @@ impl Water {
             },
         )
         .ok()?;
-        Some(Water { meshes, mat, level })
+        Some(Water { meshes, mat, level: active_level })
     }
 
     pub fn draw(&self, vp: Mat4, cp: Vec3) {
