@@ -1,0 +1,15 @@
+[package]
+name = "macroquad"
+version = "0.4.13"
+edition = "2021"
+
+[features]
+default = []
+audio = []
+
+
+[dependencies]
+glam = "0.27"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+fontdue = "0.8"
+rodio = { version = "0.17", default-features = false, features = ["vorbis", "wav"] }

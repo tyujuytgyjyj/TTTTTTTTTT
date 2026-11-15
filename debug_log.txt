@@ -1,0 +1,4 @@
+APEX.drive debug log (fps every 5s)
+fps=34 frame_ms=29.2 res_scale=1.00 in_game=false
+fps=42 frame_ms=23.9 res_scale=1.00 in_game=false
+fps=10 frame_ms=100.0 res_scale=1.00 in_game=true

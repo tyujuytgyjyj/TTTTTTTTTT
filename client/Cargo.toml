@@ -1,0 +1,24 @@
+[package]
+name = "crashdrive"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "crashdrive"
+path = "src/main.rs"
+
+[dependencies]
+macroquad = { path = "../ogre_macroquad", features = ["audio"] }
+gltf = { version = "1", default-features = false, features = ["utils", "names"] }
+jpeg-decoder = { version = "0.3", default-features = false }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+crashdrive-shared = { path = "../shared" }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+serde = { workspace = true }
+bincode = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+bytes = { workspace = true }
+

@@ -1,0 +1,23 @@
+[package]
+name = "crashdrive-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "crashdrive-server"
+path = "src/main.rs"
+
+[dependencies]
+crashdrive-shared = { path = "../shared" }
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,9 @@
+{
+  "game_title": "APEX.drive",
+  "game_title_prefix": "APEX.",
+  "game_title_suffix": "drive",
+  "subtitle": "Production Soft-Body Vehicle Physics & Driving Simulation",
+  "version": "1.0.0",
+  "accent_rgb": [0.98, 0.48, 0.08],
+  "studio": "Cosmos Studio Engineering"
+}

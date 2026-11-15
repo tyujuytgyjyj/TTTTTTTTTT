@@ -1,0 +1,2 @@
+APEX.drive Panic: panicked at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library\std\src\thread\lifecycle.rs:226:14:
+threads should not terminate unexpectedly

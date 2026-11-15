@@ -1,0 +1,8 @@
+target/
+*.exe
+*.pdb
+*.rlib
+*.rmeta
+mods/*.zip
+Ogre.log
+apex_bridge_error.txt

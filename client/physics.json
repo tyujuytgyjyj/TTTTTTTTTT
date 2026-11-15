@@ -1,0 +1,19 @@
+{
+  "gravity": 9.81,
+  "pacejka_bx": 12.2,
+  "pacejka_cx": 1.68,
+  "pacejka_ex": 0.32,
+  "pacejka_by": 10.4,
+  "pacejka_cy": 1.48,
+  "pacejka_ey": -0.42,
+  "mu_asphalt_dry": 1.08,
+  "mu_asphalt_wet": 0.76,
+  "mu_dirt": 0.55,
+  "mu_grass": 0.42,
+  "default_tire_psi": 32.0,
+  "passenger_mass_kg": 80.0,
+  "default_bus_passengers": 24,
+  "substeps_low": 42,
+  "substeps_med": 60,
+  "substeps_high": 90
+}
