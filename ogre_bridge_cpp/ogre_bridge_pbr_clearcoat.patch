@@ -1,0 +1,23 @@
+diff --git a/ogre_bridge/ogre_bridge.cpp b/ogre_bridge/ogre_bridge.cpp
+--- a/ogre_bridge/ogre_bridge.cpp
++++ b/ogre_bridge/ogre_bridge.cpp
+@@ -461,10 +461,13 @@ static std::string getOrCreatePbsDatablockName(
+  Ogre::HlmsPbsDatablock* db = (Ogre::HlmsPbsDatablock*)hlmsPbs->createDatablock(
+  dbName, dbName, macro, blend, Ogre::HlmsParamVec());
+  if (spec > 2.0f && spec < 2.5f) {
+- // طلاء سيارات ميتاليك بطبقة ورنيش
+- db->setWorkflow(Ogre::HlmsPbsDatablock::SpecularAsFresnelWorkflow);
+- db->setDiffuse(Ogre::Vector3(tr * 0.92f, tg * 0.92f, tb * 0.92f));
+- db->setSpecular(Ogre::Vector3(0.35f + tr * 0.45f, 0.35f + tg * 0.45f, 0.35f + tb * 0.45f));
+- db->setRoughness(0.06f);
+- db->setFresnel(Ogre::Vector3(0.22f, 0.22f, 0.22f), false);
++ // Automotive metallic base coat + Ogre PBS clear-coat layer.
++ // Keep the body colour in the metallic workflow and let the dedicated
++ // clear-coat BRDF provide the sharp varnish highlight.
++ db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
++ db->setDiffuse(Ogre::Vector3(tr * 0.92f, tg * 0.92f, tb * 0.92f));
++ db->setMetalness(0.80f);
++ db->setRoughness(0.22f);
++ db->setClearCoat(1.0f);
++ db->setClearCoatRoughness(0.06f);
+  } else if (glass && !is_cutout) {

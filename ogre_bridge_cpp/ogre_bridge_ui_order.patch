@@ -1,0 +1,18 @@
+--- a/ogre_bridge/ogre_bridge.cpp
++++ b/ogre_bridge/ogre_bridge.cpp
+@@ -27,4 +27,5 @@
+ #include "OgreWindowEventUtilities.h"
+ #include "OgreSceneManager.h"
++#include "OgreRenderQueue.h"
+ #include "OgreCamera.h"
+ #include "OgreManualObject2.h"
+@@ -333,4 +334,8 @@
+ ctx->uiManual = ctx->sceneMgr->createManualObject(Ogre::SCENE_DYNAMIC);
+ ctx->uiManual->setRenderQueueGroup(1);
++// UI is alpha blended and its draw order is significant. Ogre's default
++// queue sorting can reorder ManualObject sections by material, so preserve
++// insertion order for this dedicated UI queue only.
++ctx->sceneMgr->getRenderQueue()->setSortRenderQueue(1, Ogre::RenderQueue::DisableSort);
+ ctx->uiManual->setCastShadows(false);
+ ctx->uiManual->setLocalAabb(Ogre::Aabb::BOX_INFINITE);
+*** End Patch

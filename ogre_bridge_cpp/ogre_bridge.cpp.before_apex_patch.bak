@@ -1,0 +1,696 @@
+// ============================================================================
+// ogre_bridge.cpp  --  نسخة الخطوة 2 من 3 (إضاءة Forza + TRS + Alpha Test)
+// مستخرجة من رد Gemini ومنظّفة
+// ============================================================================
+#include "ogre_bridge.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <windowsx.h>
+
+#include <vector>
+#include <unordered_map>
+#include <queue>
+#include <string>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+
+#include "OgreAbiUtils.h"
+#include "OgreRoot.h"
+#include "OgreWindow.h"
+#include "OgreWindowEventUtilities.h"
+#include "OgreSceneManager.h"
+#include "OgreCamera.h"
+#include "OgreManualObject2.h"
+#include "Compositor/OgreCompositorManager2.h"
+#include "Compositor/OgreCompositorWorkspace.h"
+#include "OgreHlmsManager.h"
+#include "OgreHlmsPbs.h"
+#include "OgreHlmsPbsDatablock.h"
+#include "OgreHlmsUnlit.h"
+#include "OgreHlmsUnlitDatablock.h"
+#include "OgreHlmsSamplerblock.h"
+#include "OgreTextureGpuManager.h"
+#include "OgreStagingTexture.h"
+#include "OgreTextureBox.h"
+#include "OgreArchiveManager.h"
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+struct TexInfo {
+    Ogre::TextureGpu* gpu = nullptr;
+    bool has_cutout_alpha = false;
+};
+
+struct CachedMesh {
+    std::vector<BridgeVertex3D> cpu_verts;
+    std::vector<uint16_t> cpu_indices;
+    uint32_t tex_id = 1;
+    float avg_spec = 0.35f;
+    float base_a = 1.0f;
+    bool is_glass = false;
+
+    std::vector<Ogre::ManualObject*> pool_objs;
+    std::vector<Ogre::SceneNode*> pool_nodes;
+    std::vector<std::string> pool_db_names;
+    size_t used_this_frame = 0;
+};
+
+struct UiCmd {
+    uint32_t tex_id = 1;
+    std::vector<BridgeVertex2D> verts;
+    std::vector<uint16_t> indices;
+};
+
+struct OgreContext {
+    Ogre::Root* root = nullptr;
+    Ogre::Window* window = nullptr;
+    HWND hwnd = nullptr;
+    WNDPROC orig_wndproc = nullptr;
+
+    Ogre::SceneManager* sceneMgr = nullptr;
+    Ogre::Camera* camera = nullptr;
+    Ogre::SceneNode* camNode = nullptr;
+    Ogre::Light* sunLight = nullptr;
+    Ogre::Light* skyRimLight = nullptr;
+
+    Ogre::ManualObject* uiManual = nullptr;
+    Ogre::SceneNode* uiNode = nullptr;
+    const Ogre::HlmsSamplerblock* anisoSampler = nullptr;
+
+    uint32_t next_tex_id = 1;
+    std::unordered_map<uint32_t, TexInfo> textures;
+    std::unordered_map<uint64_t, std::string> pbs_cache;
+    std::unordered_map<uint32_t, Ogre::HlmsDatablock*> ui_datablocks;
+
+    uint32_t next_mesh_id = 1;
+    std::unordered_map<uint32_t, CachedMesh> meshes;
+
+    std::vector<UiCmd> ui_cmds;
+    float wheel_delta = 0.0f;
+    std::queue<uint32_t> char_queue;
+};
+
+static OgreContext* g_active_ctx = nullptr;
+
+// ---------------------------------------------------------------------------
+// WndProc hook
+// ---------------------------------------------------------------------------
+static LRESULT CALLBACK BridgeWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (g_active_ctx && hwnd == g_active_ctx->hwnd) {
+        if (msg == WM_MOUSEWHEEL) {
+            g_active_ctx->wheel_delta +=
+                (float)GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA;
+        } else if (msg == WM_CHAR) {
+            if (wParam >= 32) g_active_ctx->char_queue.push((uint32_t)wParam);
+        }
+        if (g_active_ctx->orig_wndproc) {
+            return CallWindowProcW(g_active_ctx->orig_wndproc, hwnd, msg, wParam, lParam);
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// ---------------------------------------------------------------------------
+// HLMS registration
+// ---------------------------------------------------------------------------
+static void registerHlms(Ogre::Root* root) {
+    Ogre::String mediaRoot =
+        "C:/biqfr/build_ogre_scripts-v3-0/Ogre/ogre-next/Samples/Media/";
+
+    auto setupHlms = [&](bool isPbs) {
+        Ogre::String mainFolderPath;
+        Ogre::StringVector libraryFoldersPaths;
+        if (isPbs) Ogre::HlmsPbs::getDefaultPaths(mainFolderPath, libraryFoldersPaths);
+        else       Ogre::HlmsUnlit::getDefaultPaths(mainFolderPath, libraryFoldersPaths);
+
+        Ogre::Archive* archiveLibrary = Ogre::ArchiveManager::getSingletonPtr()->load(
+            mediaRoot + mainFolderPath, "FileSystem", true);
+
+        Ogre::ArchiveVec archiveLibraryFolders;
+        for (const auto& lib : libraryFoldersPaths) {
+            archiveLibraryFolders.push_back(Ogre::ArchiveManager::getSingletonPtr()->load(
+                mediaRoot + lib, "FileSystem", true));
+        }
+
+        if (isPbs) {
+            Ogre::HlmsPbs* hlmsPbs = OGRE_NEW Ogre::HlmsPbs(archiveLibrary, &archiveLibraryFolders);
+            root->getHlmsManager()->registerHlms(hlmsPbs);
+        } else {
+            Ogre::HlmsUnlit* hlmsUnlit = OGRE_NEW Ogre::HlmsUnlit(archiveLibrary, &archiveLibraryFolders);
+            root->getHlmsManager()->registerHlms(hlmsUnlit);
+        }
+    };
+
+    setupHlms(false);
+    setupHlms(true);
+
+    auto& rgm = Ogre::ResourceGroupManager::getSingleton();
+    rgm.addResourceLocation(mediaRoot + "2.0/scripts/materials/Common",      "FileSystem", "General");
+    rgm.addResourceLocation(mediaRoot + "2.0/scripts/materials/Common/HLSL", "FileSystem", "General");
+    rgm.initialiseAllResourceGroups(true);
+}
+
+// ---------------------------------------------------------------------------
+// Textures  (قبل ogre_init لتفادي خطأ "identifier not found")
+// ---------------------------------------------------------------------------
+BRIDGE_API uint32_t ogre_create_texture(void* raw_ctx, uint32_t width, uint32_t height,
+                                        const uint8_t* rgba, bool linear_filter) {
+    OgreContext* ctx = (OgreContext*)raw_ctx;
+    uint32_t id = ctx->next_tex_id++;
+    std::string name = "ApexTex_" + std::to_string(id);
+
+    // فحص هل النسيج فيه أجزاء شفافة مقصوصة (أوراق الأشجار والعشب والأسوار)
+    bool cutout = false;
+    if (rgba && width > 4 && height > 4) {
+        size_t total = (size_t)width * height;
+        size_t step = std::max<size_t>(1, total / 512);
+        size_t zero_alpha = 0;
+        for (size_t i = 0; i < total; i += step) {
+            uint8_t a = rgba[i * 4 + 3];
+            if (a < 30) zero_alpha++;
+        }
+        if (zero_alpha > 3) cutout = true;
+    }
+
+    Ogre::TextureGpuManager* texMgr = ctx->root->getRenderSystem()->getTextureGpuManager();
+    Ogre::TextureGpu* tex = texMgr->createTexture(
+        name, Ogre::GpuPageOutStrategy::Discard,
+        Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
+
+    tex->setResolution(width, height);
+    tex->setPixelFormat(Ogre::PFG_RGBA8_UNORM_SRGB);
+    tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+
+    if (rgba) {
+        Ogre::StagingTexture* staging =
+            texMgr->getStagingTexture(width, height, 1, 1, Ogre::PFG_RGBA8_UNORM_SRGB);
+        staging->startMapRegion();
+        Ogre::TextureBox box = staging->mapRegion(width, height, 1, 1, Ogre::PFG_RGBA8_UNORM_SRGB);
+        for (uint32_t y = 0; y < height; ++y) {
+            memcpy((uint8_t*)box.at(0, y, 0),
+                   rgba + (size_t)y * width * 4,
+                   (size_t)width * 4);
+        }
+        staging->stopMapRegion();
+        staging->upload(box, tex, 0, nullptr, nullptr, false);
+        texMgr->removeStagingTexture(staging);
+    }
+
+    ctx->textures[id] = { tex, cutout };
+    return id;
+}
+
+BRIDGE_API void ogre_update_texture(void* raw_ctx, uint32_t tex_id,
+                                    uint32_t width, uint32_t height,
+                                    const uint8_t* rgba) {
+    OgreContext* ctx = (OgreContext*)raw_ctx;
+    auto it = ctx->textures.find(tex_id);
+    if (it == ctx->textures.end() || !rgba) return;
+
+    Ogre::TextureGpu* tex = it->second.gpu;
+    Ogre::TextureGpuManager* texMgr = ctx->root->getRenderSystem()->getTextureGpuManager();
+
+    if (tex->getWidth() != width || tex->getHeight() != height) {
+        tex->scheduleTransitionTo(Ogre::GpuResidency::OnStorage);
+        tex->setResolution(width, height);
+        tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+    }
+
+    Ogre::StagingTexture* staging =
+        texMgr->getStagingTexture(width, height, 1, 1, Ogre::PFG_RGBA8_UNORM_SRGB);
+    staging->startMapRegion();
+    Ogre::TextureBox box = staging->mapRegion(width, height, 1, 1, Ogre::PFG_RGBA8_UNORM_SRGB);
+    for (uint32_t y = 0; y < height; ++y) {
+        memcpy((uint8_t*)box.at(0, y, 0),
+               rgba + (size_t)y * width * 4,
+               (size_t)width * 4);
+    }
+    staging->stopMapRegion();
+    staging->upload(box, tex, 0, nullptr, nullptr, false);
+    texMgr->removeStagingTexture(staging);
+}
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+BRIDGE_API void* ogre_init(const char* title, int width, int height, int msaa) {
+    OgreContext* ctx = new OgreContext();
+    g_active_ctx = ctx;
+
+    const Ogre::AbiCookie abiCookie = Ogre::generateAbiCookie();
+    ctx->root = new Ogre::Root(&abiCookie, "plugins.cfg", "ogre.cfg", "Ogre.log", title);
+
+    Ogre::RenderSystem* rs = ctx->root->getRenderSystemByName("Direct3D11 Rendering Subsystem");
+    if (!rs) {
+        const Ogre::RenderSystemList& list = ctx->root->getAvailableRenderers();
+        if (!list.empty()) rs = list.front();
+    }
+    ctx->root->setRenderSystem(rs);
+    ctx->root->initialise(false);
+
+    Ogre::NameValuePairList params;
+    params["vsync"] = "false";
+    params["gamma"] = "true";
+    params["FSAA"]  = msaa > 1 ? std::to_string(msaa) : "0";
+    ctx->window = ctx->root->createRenderWindow(title, width, height, false, &params);
+
+    ctx->window->getCustomAttribute("WINDOW", &ctx->hwnd);
+    if (ctx->hwnd) {ctx->orig_wndproc =
+(WNDPROC)SetWindowLongPtrW(ctx->hwnd, GWLP_WNDPROC, (LONG_PTR)BridgeWndProc);
+}
+registerHlms(ctx->root);
+// --- Anisotropic sampler للطرق والأسفلت ---
+Ogre::HlmsSamplerblock sb;
+sb.mMinFilter = Ogre::FO_ANISOTROPIC;
+sb.mMagFilter = Ogre::FO_ANISOTROPIC;
+sb.mMipFilter = Ogre::FO_LINEAR;
+sb.mMaxAnisotropy = 8.0f;
+sb.setAddressingMode(Ogre::TAM_WRAP);
+ctx->anisoSampler = ctx->root->getHlmsManager()->getSamplerblock(sb);
+// --- المشهد والكاميرا (الكاميرا مربوطة بعقدة camNode) ---
+ctx->sceneMgr = ctx->root->createSceneManager(Ogre::ST_GENERIC, 2, "ApexMainScene");
+ctx->camera = ctx->sceneMgr->createCamera("MainCam");
+ctx->camera->detachFromParent();
+ctx->camNode = ctx->sceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)
+->createChildSceneNode(Ogre::SCENE_DYNAMIC);
+ctx->camNode->attachObject(ctx->camera);
+ctx->camera->setNearClipDistance(0.12f);
+ctx->camera->setFarClipDistance(2200.0f);
+ctx->camera->setAutoAspectRatio(true);
+// --- الإضاءة ---
+ctx->sceneMgr->setAmbientLight(
+Ogre::ColourValue(0.45f, 0.58f, 0.78f),
+Ogre::ColourValue(0.28f, 0.25f, 0.22f),
+Ogre::Vector3::UNIT_Y);
+// الشمس الرئيسية (دافئة)
+ctx->sunLight = ctx->sceneMgr->createLight();
+Ogre::SceneNode* sunNode = ctx->sceneMgr->getRootSceneNode()->createChildSceneNode();
+sunNode->attachObject(ctx->sunLight);
+ctx->sunLight->setType(Ogre::Light::LT_DIRECTIONAL);
+ctx->sunLight->setDiffuseColour(1.0f, 0.94f, 0.84f);
+ctx->sunLight->setSpecularColour(1.0f, 0.96f, 0.90f);
+ctx->sunLight->setDirection(Ogre::Vector3(-0.5f, -0.8f, -0.3f).normalisedCopy());
+ctx->sunLight->setPowerScale(Ogre::Math::PI * 1.65f);
+// إضاءة الحواف (Rim / Sky Fill)
+ctx->skyRimLight = ctx->sceneMgr->createLight();
+Ogre::SceneNode* rimNode = ctx->sceneMgr->getRootSceneNode()->createChildSceneNode();
+rimNode->attachObject(ctx->skyRimLight);
+ctx->skyRimLight->setType(Ogre::Light::LT_DIRECTIONAL);
+ctx->skyRimLight->setDiffuseColour(0.55f, 0.72f, 1.0f);
+ctx->skyRimLight->setSpecularColour(0.65f, 0.80f, 1.0f);
+ctx->skyRimLight->setDirection(Ogre::Vector3(0.5f, -0.35f, 0.6f).normalisedCopy());
+ctx->skyRimLight->setPowerScale(Ogre::Math::PI * 0.45f);
+// --- طبقة الواجهة: ابن مباشر لعقدة الكاميرا ---
+ctx->uiManual = ctx->sceneMgr->createManualObject(Ogre::SCENE_DYNAMIC);
+ctx->uiManual->setRenderQueueGroup(1);
+ctx->uiManual->setCastShadows(false);
+ctx->uiManual->setLocalAabb(Ogre::Aabb::BOX_INFINITE);
+ctx->uiNode = ctx->camNode->createChildSceneNode(Ogre::SCENE_DYNAMIC);
+ctx->uiNode->attachObject(ctx->uiManual);
+// --- Workspace أساسي ---
+Ogre::CompositorManager2* compMgr = ctx->root->getCompositorManager2();
+const Ogre::String wsName = "ApexBasicWS";
+if (!compMgr->hasWorkspaceDefinition(wsName)) {
+compMgr->createBasicWorkspaceDef(
+wsName, Ogre::ColourValue(0.48f, 0.68f, 0.94f, 1.0f), Ogre::IdString());
+}
+compMgr->addWorkspace(ctx->sceneMgr, ctx->window->getTexture(), ctx->camera, wsName, true);
+// --- نسيج أبيض افتراضي (id = 1) ---
+uint32_t white_pixel = 0xFFFFFFFF;
+ogre_create_texture(ctx, 1, 1, (const uint8_t*)&white_pixel, false);
+return ctx;
+}
+// ---------------------------------------------------------------------------
+// Meshes (ManualObject V2)
+// ---------------------------------------------------------------------------
+static void populateManualObject(
+Ogre::ManualObject* mo,
+const std::string& dbName,
+const std::vector& verts,
+const std::vector<uint16_t>& indices)
+{
+mo->clear();
+if (verts.empty() || indices.size() < 3) return;
+mo->begin(dbName, Ogre::OT_TRIANGLE_LIST);
+Ogre::Vector3 bmin(1e9f, 1e9f, 1e9f);
+Ogre::Vector3 bmax(-1e9f, -1e9f, -1e9f);
+for (size_t i = 0; i < verts.size(); ++i) {
+const BridgeVertex3D& v = verts[i];
+mo->position(v.px, v.py, v.pz);
+mo->normal(v.nx, v.ny, v.nz);
+mo->textureCoord(v.u, v.v);
+mo->colour(v.r / 255.0f, v.g / 255.0f, v.b / 255.0f, v.a / 255.0f);
+bmin.makeFloor(Ogre::Vector3(v.px, v.py, v.pz));
+bmax.makeCeil(Ogre::Vector3(v.px, v.py, v.pz));
+}
+for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+mo->triangle(indices[i], indices[i + 1], indices[i + 2]);
+}
+mo->end();
+Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(bmin - Ogre::Vector3(0.25f),
+bmax + Ogre::Vector3(0.25f));
+mo->setLocalAabb(aabb);
+}
+BRIDGE_API uint32_t ogre_upload_mesh(
+void* raw_ctx,
+const BridgeVertex3D* verts, uint32_t vcount,
+const uint16_t* indices, uint32_t icount,
+uint32_t tex_id, bool is_glass)
+{
+OgreContext* ctx = (OgreContext*)raw_ctx;
+if (vcount == 0 || icount < 3) return 0;
+uint32_t id = ctx->next_mesh_id++;
+CachedMesh cm;
+cm.cpu_verts.assign(verts, verts + vcount);
+cm.cpu_indices.assign(indices, indices + icount);
+cm.tex_id   = (tex_id == 0) ? 1 : tex_id;
+cm.is_glass = is_glass;
+cm.avg_spec = verts->spec;
+cm.base_a   = verts->a / 255.0f;
+ctx->meshes[id] = std::move(cm);
+return id;
+}
+BRIDGE_API void ogre_update_mesh_vertices(
+void* raw_ctx, uint32_t mesh_id,
+const BridgeVertex3D* verts, uint32_t vcount,
+const uint16_t* indices, uint32_t icount)
+{
+OgreContext* ctx = (OgreContext*)raw_ctx;
+auto it = ctx->meshes.find(mesh_id);
+if (it == ctx->meshes.end() || vcount == 0 || icount < 3) return;
+CachedMesh& cm = it->second;
+cm.cpu_verts.assign(verts, verts + vcount);
+cm.cpu_indices.assign(indices, indices + icount);
+cm.avg_spec = verts->spec;
+for (size_t i = 0; i < cm.pool_objs.size(); ++i) {
+populateManualObject(cm.pool_objs[i], cm.pool_db_names[i], cm.cpu_verts, cm.cpu_indices);
+}
+}
+// ---------------------------------------------------------------------------
+// PBS datablocks
+// ---------------------------------------------------------------------------
+static std::string getOrCreatePbsDatablockName(
+OgreContext* ctx, uint32_t tex_id,
+float tr, float tg, float tb,
+float spec, bool glass, float alpha)
+{
+uint32_t qr = (uint32_t)(tr * 63.0f) & 63;
+uint32_t qg = (uint32_t)(tg * 63.0f) & 63;
+uint32_t qb = (uint32_t)(tb * 63.0f) & 63;
+uint32_t qs = (uint32_t)((spec + 2.0f) * 20.0f) & 255;
+uint64_t key = ((uint64_t)tex_id << 32) |
+((uint64_t)qr << 24) | ((uint64_t)qg << 18) |
+((uint64_t)qb << 12) | ((uint64_t)qs << 2)  |
+(glass ? 1ULL : 0ULL);
+auto it = ctx->pbs_cache.find(key);
+if (it != ctx->pbs_cache.end()) return it->second;
+auto texIt = ctx->textures.find(tex_id == 0 ? 1 : tex_id);
+bool is_cutout = (texIt != ctx->textures.end()) ? texIt->second.has_cutout_alpha : false;
+Ogre::HlmsPbs* hlmsPbs =
+(Ogre::HlmsPbs*)ctx->root->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
+Ogre::HlmsMacroblock macro;
+Ogre::HlmsBlendblock blend;
+macro.mCullMode = Ogre::CULL_NONE;
+if (glass && !is_cutout) {
+macro.mDepthWrite = false;
+blend.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
+}
+std::string dbName = "ApexPBS_" + std::to_string(key);
+Ogre::HlmsPbsDatablock* db = (Ogre::HlmsPbsDatablock*)hlmsPbs->createDatablock(
+dbName, dbName, macro, blend, Ogre::HlmsParamVec());
+if (spec > 2.0f && spec < 2.5f) {
+// طلاء سيارات ميتاليك بطبقة ورنيش
+db->setWorkflow(Ogre::HlmsPbsDatablock::SpecularAsFresnelWorkflow);
+db->setDiffuse(Ogre::Vector3(tr * 0.92f, tg * 0.92f, tb * 0.92f));
+db->setSpecular(Ogre::Vector3(0.35f + tr * 0.45f, 0.35f + tg * 0.45f, 0.35f + tb * 0.45f));
+db->setRoughness(0.06f);
+db->setFresnel(Ogre::Vector3(0.22f, 0.22f, 0.22f), false);
+} else if (glass && !is_cutout) {
+// زجاج السيارات
+db->setWorkflow(Ogre::HlmsPbsDatablock::SpecularAsFresnelWorkflow);
+db->setDiffuse(Ogre::Vector3(0.06f, 0.09f, 0.13f));
+db->setSpecular(Ogre::Vector3(0.95f, 0.98f, 1.0f));
+db->setRoughness(0.03f);
+db->setFresnel(Ogre::Vector3(0.35f, 0.35f, 0.35f), false);
+db->setTransparency(0.42f, Ogre::HlmsPbsDatablock::Transparent);
+} else if (spec < 0.0f) {
+// مطاط الإطارات
+db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+db->setDiffuse(Ogre::Vector3(tr * 0.85f, tg * 0.85f, tb * 0.85f));
+db->setMetalness(0.04f);
+db->setRoughness(0.68f);
+} else if (spec > 0.85f && spec <= 0.95f) {
+// جنوط كروم وألمنيوم ومصابيح
+db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+db->setDiffuse(Ogre::Vector3(tr, tg, tb));
+db->setMetalness(0.92f);
+db->setRoughness(0.10f);
+} else {
+// أسفلت ومبانٍ وأعشاب وأشجار
+db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+db->setDiffuse(Ogre::Vector3(tr, tg, tb));
+db->setMetalness(0.04f);
+db->setRoughness(is_cutout ? 0.72f : 0.55f);
+}
+// Alpha Test للعشب وأوراق الشجر
+if (is_cutout) {
+db->setAlphaTest(Ogre::CMPF_GREATER_EQUAL);
+db->setAlphaTestThreshold(0.35f);
+}
+if (texIt != ctx->textures.end() && tex_id > 1) {
+db->setTexture(Ogre::PBSM_DIFFUSE, texIt->second.gpu, ctx->anisoSampler);
+}
+ctx->pbs_cache[key] = dbName;
+return dbName;
+}
+// ---------------------------------------------------------------------------
+// Drawing 3D (TRS: موضع + دوران كواتيرنيون + مقياس)
+// ---------------------------------------------------------------------------
+BRIDGE_API void ogre_draw_mesh_trs(
+void* raw_ctx, uint32_t mesh_id,
+float px, float py, float pz,
+float qx, float qy, float qz, float qw,
+float sx, float sy, float sz,
+float tint_r, float tint_g, float tint_b,
+bool is_glass)
+{
+OgreContext* ctx = (OgreContext*)raw_ctx;
+auto it = ctx->meshes.find(mesh_id);
+if (it == ctx->meshes.end() || it->second.cpu_indices.size() < 3) return;
+CachedMesh& cm = it->second;
+std::string dbName = getOrCreatePbsDatablockName(
+ctx, cm.tex_id, tint_r, tint_g, tint_b,
+cm.avg_spec, is_glass || cm.is_glass, cm.base_a);
+size_t idx = cm.used_this_frame++;
+if (idx >= cm.pool_objs.size()) {
+Ogre::ManualObject* newObj = ctx->sceneMgr->createManualObject(Ogre::SCENE_DYNAMIC);
+newObj->setRenderQueueGroup(0);
+populateManualObject(newObj, dbName, cm.cpu_verts, cm.cpu_indices);
+Ogre::SceneNode* newNode = ctx->sceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)
+->createChildSceneNode(Ogre::SCENE_DYNAMIC);
+newNode->attachObject(newObj);
+cm.pool_objs.push_back(newObj);
+cm.pool_nodes.push_back(newNode);
+cm.pool_db_names.push_back(dbName);
+} else if (cm.pool_db_names[idx] != dbName) {
+cm.pool_objs[idx]->setDatablock(0, dbName);
+cm.pool_db_names[idx] = dbName;
+}
+Ogre::ManualObject* mo   = cm.pool_objs[idx];
+Ogre::SceneNode*    node = cm.pool_nodes[idx];
+mo->setVisible(true);
+node->setPosition(Ogre::Vector3(px, py, pz));
+node->setOrientation(Ogre::Quaternion(qw, qx, qy, qz));  // ترتيب Ogre: w,x,y,z
+node->setScale(Ogre::Vector3(sx, sy, sz));
+}
+// ---------------------------------------------------------------------------
+// Camera & environment
+// ---------------------------------------------------------------------------
+BRIDGE_API void ogre_set_camera_pose(
+void* raw_ctx,
+float px, float py, float pz,
+float qx, float qy, float qz, float qw,
+float fov_rad, float znear, float zfar)
+{
+OgreContext* ctx = (OgreContext*)raw_ctx;
+ctx->camera->setFOVy(Ogre::Radian(fov_rad));
+ctx->camera->setNearClipDistance(znear > 0.02f ? znear : 0.12f);
+ctx->camera->setFarClipDistance(zfar > 10.0f ? zfar : 2200.0f);
+ctx->camNode->setPosition(Ogre::Vector3(px, py, pz));
+ctx->camNode->setOrientation(Ogre::Quaternion(qw, qx, qy, qz));
+}
+BRIDGE_API void ogre_set_env(void* raw_ctx,
+float sun_x, float sun_y, float sun_z,
+float fog_r, float fog_g, float fog_b,
+float sun_elev) {
+OgreContext* ctx = (OgreContext*)raw_ctx;
+Ogre::Vector3 dir(-sun_x, -sun_y, -sun_z);
+if (dir.squaredLength() < 1e-4f) dir = Ogre::Vector3(-0.4f, -0.8f, -0.3f);
+dir.normalise();
+ctx->sunLight->setDirection(dir);
+ctx->skyRimLight->setDirection(Ogre::Vector3(-dir.x, -0.35f, -dir.z).normalisedCopy());
+float day = std::fmin(1.0f, std::fmax(0.10f, (sun_elev + 0.12f) * 2.2f));
+ctx->sunLight->setPowerScale(Ogre::Math::PI * (0.35f + 1.45f * day));
+ctx->skyRimLight->setPowerScale(Ogre::Math::PI * (0.15f + 0.40f * day));
+ctx->sceneMgr->setAmbientLight(
+Ogre::ColourValue(fog_r * 0.72f + 0.08f, fog_g * 0.75f + 0.08f, fog_b * 0.80f + 0.10f),
+Ogre::ColourValue(0.12f + 0.18f * day, 0.11f + 0.16f * day, 0.10f + 0.14f * day),
+Ogre::Vector3::UNIT_Y);
+}
+// ---------------------------------------------------------------------------
+// UI (2D)
+// ---------------------------------------------------------------------------
+static std::string getOrCreateUiDatablockName(OgreContext* ctx, uint32_t tex_id) {
+uint32_t tid = (tex_id == 0) ? 1 : tex_id;
+std::string name = "ApexUI_" + std::to_string(tid);
+if (ctx->ui_datablocks.find(tid) != ctx->ui_datablocks.end()) return name;
+Ogre::HlmsUnlit* unlit =
+(Ogre::HlmsUnlit*)ctx->root->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT);
+Ogre::HlmsMacroblock macro;
+macro.mDepthCheck = false;
+macro.mDepthWrite = false;
+macro.mCullMode   = Ogre::CULL_NONE;
+Ogre::HlmsBlendblock blend;
+blend.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
+Ogre::HlmsUnlitDatablock* db = (Ogre::HlmsUnlitDatablock*)unlit->createDatablock(
+name, name, macro, blend, Ogre::HlmsParamVec());
+auto texIt = ctx->textures.find(tid);
+if (texIt != ctx->textures.end()) {
+db->setTexture(0, texIt->second.gpu);
+}
+ctx->ui_datablocks[tid] = db;
+return name;
+}
+BRIDGE_API void ogre_draw_2d_batch(
+void* raw_ctx,
+const BridgeVertex2D* verts, uint32_t vcount,
+const uint16_t* indices, uint32_t icount,
+uint32_t tex_id)
+{
+if (!raw_ctx || vcount == 0 || icount == 0) return;
+OgreContext* ctx = (OgreContext*)raw_ctx;
+uint32_t tid = (tex_id == 0) ? 1 : tex_id;
+if (!ctx->ui_cmds.empty() &&
+ctx->ui_cmds.back().tex_id == tid &&
+ctx->ui_cmds.back().verts.size() + vcount < 60000) {
+UiCmd& cmd = ctx->ui_cmds.back();
+uint16_t base = (uint16_t)cmd.verts.size();
+cmd.verts.insert(cmd.verts.end(), verts, verts + vcount);
+for (uint32_t i = 0; i < icount; ++i) {
+cmd.indices.push_back((uint16_t)(base + indices[i]));
+}
+} else {
+UiCmd cmd;
+cmd.tex_id = tid;
+cmd.verts.assign(verts, verts + vcount);
+cmd.indices.assign(indices, indices + icount);
+ctx->ui_cmds.push_back(std::move(cmd));
+}
+}
+// ---------------------------------------------------------------------------
+// Frame
+// ---------------------------------------------------------------------------
+BRIDGE_API bool ogre_begin_frame(void* raw_ctx, int* out_w, int* out_h) {
+if (!raw_ctx) return false;
+OgreContext* ctx = (OgreContext*)raw_ctx;
+Ogre::WindowEventUtilities::messagePump();
+if (ctx->window->isClosed()) return false;
+*out_w = (int)ctx->window->getWidth();
+*out_h = (int)ctx->window->getHeight();
+for (auto& kv : ctx->meshes) {
+kv.second.used_this_frame = 0;
+}
+ctx->ui_cmds.clear();
+return true;
+}
+BRIDGE_API bool ogre_end_frame(void* raw_ctx) {
+if (!raw_ctx) return false;
+OgreContext* ctx = (OgreContext*)raw_ctx;
+// إخفاء الكائنات غير المستخدمة هذا الإطار
+for (auto& kv : ctx->meshes) {
+CachedMesh& cm = kv.second;
+for (size_t i = cm.used_this_frame; i < cm.pool_objs.size(); ++i) {
+cm.pool_objs[i]->setVisible(false);
+}
+}
+// بناء الواجهة (uiNode ابن لـ camNode فتتبع الكاميرا مباشرة)
+ctx->uiManual->clear();
+float sw = (float)(ctx->window->getWidth()  > 0 ? ctx->window->getWidth()  : 1);
+float sh = (float)(ctx->window->getHeight() > 0 ? ctx->window->getHeight() : 1);
+float aspect = sw / sh;
+const float base_d = 1.5f;
+float tan_half_fov = std::tan(ctx->camera->getFOVy().valueRadians() * 0.5f);
+for (size_t ci = 0; ci < ctx->ui_cmds.size(); ++ci) {
+const UiCmd& cmd = ctx->ui_cmds[ci];
+if (cmd.indices.size() < 3) continue;
+// إزاحة عمق صغيرة لكل طبقة
+float d = base_d - (float)ci * 0.0005f;
+float half_h = d * tan_half_fov;
+float half_w = half_h * aspect;
+std::string dbName = getOrCreateUiDatablockName(ctx, cmd.tex_id);
+ctx->uiManual->begin(dbName, Ogre::OT_TRIANGLE_LIST);
+for (const auto& v : cmd.verts) {
+float ndc_x = (v.x / sw) * 2.0f - 1.0f;
+float ndc_y = 1.0f - (v.y / sh) * 2.0f;
+ctx->uiManual->position(ndc_x * half_w, ndc_y * half_h, -d);
+ctx->uiManual->textureCoord(v.u, v.v);
+ctx->uiManual->colour(v.r / 255.0f, v.g / 255.0f, v.b / 255.0f, v.a / 255.0f);
+}
+for (size_t i = 0; i + 2 < cmd.indices.size(); i += 3) {
+ctx->uiManual->triangle(cmd.indices[i], cmd.indices[i + 1], cmd.indices[i + 2]);
+}
+ctx->uiManual->end();
+}
+return ctx->root->renderOneFrame();
+}
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+BRIDGE_API bool ogre_key_down(int vk_code) {
+if (!g_active_ctx || GetForegroundWindow() != g_active_ctx->hwnd) return false;
+return (GetAsyncKeyState(vk_code) & 0x8000) != 0;
+}
+BRIDGE_API void ogre_mouse_state(void* raw_ctx,
+float* mx, float* my, float* wheel_y,
+bool* left_down, bool* right_down, bool* mid_down) {
+OgreContext* ctx = (OgreContext*)raw_ctx;
+POINT pt = { 0, 0 };
+GetCursorPos(&pt);
+if (ctx->hwnd) ScreenToClient(ctx->hwnd, &pt);
+*mx = (float)pt.x;
+*my = (float)pt.y;
+*wheel_y = ctx->wheel_delta;
+ctx->wheel_delta = 0.0f;
+bool focused = (GetForegroundWindow() == ctx->hwnd);
+*left_down  = focused && ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
+*right_down = focused && ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0);
+*mid_down   = focused && ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0);
+}
+BRIDGE_API uint32_t ogre_pop_char(void* raw_ctx) {
+OgreContext* ctx = (OgreContext*)raw_ctx;
+if (ctx->char_queue.empty()) return 0;
+uint32_t c = ctx->char_queue.front();
+ctx->char_queue.pop();
+return c;
+}
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+BRIDGE_API void ogre_shutdown(void* raw_ctx) {
+if (!raw_ctx) return;
+OgreContext* ctx = (OgreContext*)raw_ctx;
+if (ctx->hwnd && ctx->orig_wndproc) {
+SetWindowLongPtrW(ctx->hwnd, GWLP_WNDPROC, (LONG_PTR)ctx->orig_wndproc);
+}
+g_active_ctx = nullptr;
+delete ctx->root;
+delete ctx;
+}
