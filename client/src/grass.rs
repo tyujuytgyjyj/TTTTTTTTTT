@@ -27,27 +27,51 @@ fn rnd(h: &mut u32) -> f32 {
 }
 
 fn make_texture() -> Texture2D {
-    let mut img = Image::gen_image_color(128, 128, Color::new(0.0, 0.0, 0.0, 0.0));
-    let mut s = 12345u32;
-    for k in 0..10 {
-        let base_x = 8.0 + k as f32 * 11.5 + rnd(&mut s) * 6.0;
-        let height = 70.0 + rnd(&mut s) * 55.0;
-        let lean = (rnd(&mut s) - 0.5) * 36.0;
-        let shade = 0.8 + rnd(&mut s) * 0.4;
+    const SIZE: i32 = 512;
+    let mut img = Image::gen_image_color(
+        SIZE as u16, SIZE as u16, Color::new(0.0, 0.0, 0.0, 0.0)
+    );
+    let mut rng = 0x9E37_79B9u32;
+    // Curved, antialiased blades with variation in width, hue, height and bend.
+    for blade in 0..42 {
+        let base_x = 12.0 + rnd(&mut rng) * 488.0;
+        let base_y = 475.0 + rnd(&mut rng) * 35.0;
+        let height = 190.0 + rnd(&mut rng) * 285.0;
+        let lean = (rnd(&mut rng) - 0.5) * 105.0;
+        let bend = (rnd(&mut rng) - 0.5) * 52.0;
+        let width = 2.2 + rnd(&mut rng) * 5.8;
+        let shade = 0.72 + rnd(&mut rng) * 0.42;
+        let hue = rnd(&mut rng);
         let steps = height as i32;
         for st in 0..steps {
             let t = st as f32 / height;
-            let y = 127 - st;
-            let x = base_x + lean * t * t;
-            let half_w = 3.4 * (1.0 - t).powf(0.7) + 0.5;
-            let x0 = (x - half_w).floor() as i32;
-            let x1 = (x + half_w).ceil() as i32;
-            let r = (0.10 + 0.32 * t) * shade;
-            let g = (0.26 + 0.38 * t) * shade;
-            let b = (0.05 + 0.10 * t) * shade;
+            let y = (base_y - st as f32).round() as i32;
+            let center = base_x + lean * t * t + bend * (t * (1.0 - t));
+            let half = width * (1.0 - t).powf(0.72) + 0.35;
+            let x0 = (center - half - 1.0).floor() as i32;
+            let x1 = (center + half + 1.0).ceil() as i32;
+            let root = 0.20 + 0.08 * hue;
+            let tip = 0.28 + 0.12 * hue;
+            let red = ((root * (1.0 - t) + tip * t) * shade).clamp(0.025, 0.65);
+            let green = ((0.22 + 0.50 * t + 0.05 * hue) * shade).clamp(0.08, 0.92);
+            let blue = ((0.055 + 0.13 * t) * shade).clamp(0.02, 0.35);
             for xx in x0..=x1 {
-                if xx >= 0 && xx < 128 && y >= 0 && y < 128 {
-                    img.set_pixel(xx as u32, y as u32, Color::new(r, g, b, 1.0));
+                if xx < 0 || xx >= SIZE || y < 0 || y >= SIZE { continue; }
+                let edge = half - (xx as f32 - center).abs();
+                let alpha = (edge + 0.65).clamp(0.0, 1.0);
+                if alpha <= 0.0 { continue; }
+                let vein = 1.0 - 0.14 * (1.0 - ((xx as f32 - center).abs() / (half + 0.1)).clamp(0.0, 1.0));
+                img.set_pixel(xx as u32, y as u32, Color::new(red * vein, green * vein, blue * vein, alpha));
+            }
+        }
+        if blade % 3 == 0 {
+            for st in (8..steps).step_by(3) {
+                let t = st as f32 / height;
+                let y = (base_y - st as f32).round() as i32;
+                let center = base_x + lean * t * t + bend * (t * (1.0 - t));
+                let x = center.round() as i32;
+                if x >= 0 && x < SIZE && y >= 0 && y < SIZE {
+                    img.set_pixel(x as u32, y as u32, Color::new(0.23, 0.55, 0.13, 0.72));
                 }
             }
         }
@@ -138,7 +162,7 @@ impl Grass {
                     position: vec3(px, py, pz),
                     uv: vec2(u, v),
                     color: [cr, cg, cb, 255],
-                    normal: vec4(0.0, 1.0, 0.0, 0.0),
+                    normal: vec4(0.0, 1.0, 0.0, 15.0),
                 };
                 verts.push(mk(x - dx, y - 0.02, z - dz, 0.0, 1.0));
                 verts.push(mk(x + dx, y - 0.02, z + dz, 1.0, 1.0));

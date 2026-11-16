@@ -15,8 +15,8 @@ MAXH = 384.640015
 hm = np.frombuffer(d[5:5+n*n*2], dtype='<u2').reshape(n, n)
 lm = np.frombuffer(d[5+n*n*2:5+n*n*3], dtype='u1').reshape(n, n)
 ORIGIN = -1023.5
-# ---- أسطح: 0 أسفلت، 2 تراب/حصى، 3 عشب
-surf_of = {0:3, 1:3, 2:2, 3:3, 4:2, 5:2, 6:3, 7:2, 8:2, 9:0, 10:0}
+# ---- أسطح: 0 أسفلت، 2 تراب/حصى، 3 عشب، 4 رمال الشاطئ
+surf_of = {0:3, 1:3, 2:2, 3:3, 4:4, 5:2, 6:3, 7:2, 8:2, 9:0, 10:0}
 lut = np.full(256, 3, dtype=np.uint8)
 for k, v in surf_of.items(): lut[k] = v
 step = 2  # 2048 -> 1024 (خلية 2م)

@@ -308,15 +308,15 @@ pub fn build_ground(arena: f32) -> Scene {
 /// يبني مجسم التضاريس الحقيقية (شرائح 64x64 خلية مع culling) وينسّقه بنسيج الألوان المخبوز.
 fn build_terrain_parts() -> Option<Vec<EPart>> {
     let hf = crate::world::terrain_hf()?;
-    let mut tex: Option<Texture2D> = None;
-    if let Some(p) = crate::world::map_path("terrain_albedo.jpg") {
-        if let Ok(b) = std::fs::read(p) { tex = decode_tex(&b); }
-    }
-    let tex = tex?;
+    let tex = crate::world::map_path("terrain_albedo.jpg")
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| decode_tex(&b))?;
     let n = hf.n;
     let chunk = 64usize;
     let ext = (n - 1) as f32;
     let white = Color::new(1.0, 1.0, 1.0, 1.0);
+    let families = [10.0f32, 11.0, 12.0, 13.0]; // sand, dirt, grass, asphalt
+    let water_level = crate::world::water_level();
     let mut meshes: Vec<Mesh> = Vec::new();
     let mut cy = 0usize;
     while cy < n - 1 {
@@ -324,8 +324,8 @@ fn build_terrain_parts() -> Option<Vec<EPart>> {
         let mut cx = 0usize;
         while cx < n - 1 {
             let ex = (cx + chunk).min(n - 1);
-            let mut mb = MeshBuilder::new();
             let w = ex - cx + 1;
+            let mut layers: Vec<MeshBuilder> = (0..4).map(|_| MeshBuilder::new()).collect();
             for iy in cy..=ey {
                 for ix in cx..=ex {
                     let x = hf.ox + ix as f32 * hf.cell;
@@ -335,8 +335,12 @@ fn build_terrain_parts() -> Option<Vec<EPart>> {
                     let hr = hf.hat((ix + 1).min(n - 1), iy);
                     let hd = hf.hat(ix, iy.saturating_sub(1));
                     let hu = hf.hat(ix, (iy + 1).min(n - 1));
-                    let nrm = vec3(-(hr - hl) / (2.0 * hf.cell), 1.0, (hu - hd) / (2.0 * hf.cell)).normalize();
-                    mb.vert_uv(vec3(x, y, z), vec2(ix as f32 / ext, iy as f32 / ext), nrm, white, 0.0);
+                    let nrm = vec3(-(hr - hl) / (2.0 * hf.cell), 1.0,
+                                   (hu - hd) / (2.0 * hf.cell)).normalize();
+                    let uv = vec2(ix as f32 / ext, iy as f32 / ext);
+                    for layer in 0..4 {
+                        layers[layer].vert_uv(vec3(x, y, z), uv, nrm, white, families[layer]);
+                    }
                 }
             }
             for iy in 0..(ey - cy) {
@@ -345,17 +349,33 @@ fn build_terrain_parts() -> Option<Vec<EPart>> {
                     let c = d + 1;
                     let a = d + w as u16;
                     let b = a + 1;
-                    mb.i.extend_from_slice(&[a, c, b, a, d, c]);
+                    let world_x = hf.ox + (cx as f32 + ix as f32 + 0.5) * hf.cell;
+                    let world_z = -(hf.oy + (cy as f32 + iy as f32 + 0.5) * hf.cell);
+                    let y = (hf.hat(cx + ix, cy + iy) + hf.hat(cx + ix + 1, cy + iy)
+                        + hf.hat(cx + ix, cy + iy + 1) + hf.hat(cx + ix + 1, cy + iy + 1)) * 0.25;
+                    let surface = hf.surface(world_x, world_z);
+                    let material = match surface {
+                        4 => 0, // explicit baked beach sand
+                        2 if water_level > -1.0e8 && y >= water_level - 0.35 && y <= water_level + 5.0 => 0,
+                        2 => 1, // dirt / gravel
+                        3 => 2, // grass
+                        0 => 3, // asphalt
+                        _ => 1,
+                    };
+                    layers[material].i.extend_from_slice(&[a, c, b, a, d, c]);
                 }
             }
-            mb.flush(&mut meshes, Some(tex.clone()));
+            for layer in 0..4 {
+                if !layers[layer].i.is_empty() {
+                    layers[layer].flush(&mut meshes, Some(tex.clone()));
+                }
+            }
             cx = ex;
         }
         cy = ey;
     }
     Some(meshes_to_parts(meshes))
 }
-
 /// طرق الخريطة الحقيقية (أسفلت، خطوط، حواف، مجاري) كشرائح فوق التضاريس. الملفات من tools/bake_roads.py
 fn build_road_parts() -> Vec<EPart> {
     let mut out: Vec<EPart> = Vec::new();
@@ -382,7 +402,7 @@ fn build_road_parts() -> Vec<EPart> {
                 position: vec3(rf(o), rf(o + 4), rf(o + 8)),
                 uv: vec2(rf(o + 12), rf(o + 16)),
                 color: [255, 255, 255, 255],
-                normal: vec4(0.0, 1.0, 0.0, 0.0),
+                normal: vec4(0.0, 1.0, 0.0, 14.0),
             });
         }
         let mut idx = Vec::with_capacity(ni);
@@ -402,6 +422,12 @@ pub fn sync_terrain(sc: &mut Scene) {
     let want = crate::world::terrain_active();
     let cur = crate::world::map_dir();
     if want && (!sc.terrain_on || sc.terrain_name != cur) {
+        // Load water metadata first; terrain materials use its sea level to
+        // distinguish the existing beach band from inland dirt/gravel.
+        let loaded_water = crate::water::Water::load();
+        if loaded_water.is_none() {
+            crate::world::set_water_level(-1.0e9);
+        }
         if let Some(mut parts) = build_terrain_parts() {
             parts.extend(build_road_parts());
             if !sc.terrain_on {
@@ -410,10 +436,12 @@ pub fn sync_terrain(sc: &mut Scene) {
             }
             sc.ground = parts;
             sc.props = crate::props::Props::load();
-            sc.water = crate::water::Water::load();
+            sc.water = loaded_water;
             sc.grass = Some(crate::grass::Grass::new());
             sc.terrain_on = true;
             sc.terrain_name = cur;
+        } else {
+            crate::world::set_water_level(-1.0e9);
         }
     } else if !want && sc.terrain_on {
         sc.ground = std::mem::take(&mut sc.ground_backup);

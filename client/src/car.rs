@@ -888,7 +888,7 @@ impl Car {
                 let (surf_id, surf_mu, roll_res) = if let Some(sid) = crate::world::terrain_surface(m.x, m.z) {
                     match sid {
                         0 => (0u8, pcfg.mu_asphalt_dry, 0.012),
-                        2 => (2u8, pcfg.mu_dirt, 0.028),
+                        2 | 4 => (2u8, pcfg.mu_dirt, 0.028),
                         _ => (3u8, pcfg.mu_grass, 0.042),
                     }
                 } else if m.x.abs() < world.arena && m.z.abs() < world.arena {

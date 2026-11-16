@@ -329,7 +329,7 @@ impl World {
         vec3(-dx / (2.0 * e), 1.0, -dz / (2.0 * e)).normalize()
     }
     pub fn mu(&self, x: f32, z: f32) -> f32 {
-        if let Some(s) = terrain_surface(x, z) { return match s { 0 => 1.0, 2 => 0.58, _ => 0.5 }; }
+        if let Some(s) = terrain_surface(x, z) { return match s { 0 => 1.0, 2 | 4 => 0.58, _ => 0.5 }; }
         if x.abs() < self.arena && z.abs() < self.arena {
             if x > 60.0 && x < 95.0 && z > -95.0 && z < -60.0 { 0.55 } else { 1.0 } // gravel patch
         } else { 0.62 }
